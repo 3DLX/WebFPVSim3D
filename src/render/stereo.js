@@ -6,10 +6,13 @@
  *
  *   window.__fpvrStereo = { on: true, eyeSep: 0.064, focus: 10 }
  *
- * eyeSep is the distance between the two eye cameras in metres of the world,
- * focus the distance in metres at which both eyes see the same point (zero
- * parallax): nearer things stand out of the screen, farther things sit
- * behind it.
+ * eyeSep is the distance between the two eye cameras and focus the distance
+ * at which both eyes see the same point, both in metres AT THE AIRCRAFT'S
+ * SCALE, converted through simLenToWorld like the camera mount: a map built
+ * larger or smaller than the aircraft (WORLD_SCALE, frame.js) would
+ * otherwise give the same setting a different depth on every map. At focus
+ * the parallax is zero: nearer things stand out of the screen, farther
+ * things sit behind it.
  *
  * HOW. Each eye is drawn by the map's own post pipeline, exactly as the sim
  * draws its mono frame, at the full canvas size, and the result is then
@@ -59,6 +62,7 @@
  */
 
 import * as THREE from 'three';
+import { simLenToWorld } from './frame.js';
 
 if (typeof window !== 'undefined') {
   window.__fpvrStereoNative = true;
@@ -135,7 +139,8 @@ export function renderStereo(post, camera, renderer, req) {
   baseProj.copy(camera.projectionMatrix);
 
   const shadowAuto = renderer.shadowMap.autoUpdate;
-  const sep = req.eyeSep / 2;
+  const sep = simLenToWorld(req.eyeSep) / 2;
+  const focus = simLenToWorld(req.focus);
   try {
     for (let eye = 0; eye < 2; eye += 1) {
       const side = eye === 0 ? -1 : 1;
@@ -145,7 +150,7 @@ export function renderStereo(post, camera, renderer, req) {
       /* Off-axis frustum: shift the projection toward the middle so the two
        * frusta cross at `focus`. Column major, elements[8] is m[0][2]. */
       camera.projectionMatrix.copy(baseProj);
-      camera.projectionMatrix.elements[8] += -side * sep * baseProj.elements[0] / req.focus;
+      camera.projectionMatrix.elements[8] += -side * sep * baseProj.elements[0] / focus;
       camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
       if (eye === 1) {
         renderer.shadowMap.autoUpdate = false;

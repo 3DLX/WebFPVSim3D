@@ -76423,3 +76423,11 @@ Fix: nothing is resized any more. Each eye is drawn by the map's own pipeline at
 Checks run on this tree: gen-preload up to date, boot-check 10 of 10 clean, frame-check 34 passed, 0 failed. Neither can see this bug: it needs a built pipeline map with stereo on, which is checked by loading the deployed branch in a browser after the push.
 
 Follow up, same day: the copy came out black in a real browser. The sim's canvas is opaque (RGB), and `copyTexSubImage2D` refuses to copy an RGB framebuffer into an RGBA texture. Replaced with raw WebGL2 `blitFramebuffer` into an RGBA8 renderbuffer (each eye squeezed into its half with LINEAR filtering on the way), then one blit back to the screen. Without WebGL2 the mono frame is drawn. boot-check 10 of 10 and frame-check 34 of 34 on this tree; the picture itself is checked on the deployed branch in a browser.
+
+## 2026-11-17: fpvr-stereo: eye separation and convergence at the aircraft's scale
+
+The pilot's verdict on the copy and blit version in FPVR: it works, best at 75 mm separation and 5 m convergence. Asked why 75 and not his real 64.5, the answer included a defect found while checking: eyeSep and focus were taken as world metres, so on any map flown at a WORLD_SCALE other than 1 (a five inch in Nick Burns' house, a whoop in the town) the same setting meant a different separation relative to the aircraft. Both now go through `simLenToWorld`, the same conversion as the camera mount, so a setting feels the same on every map. At WORLD_SCALE 1 nothing changes.
+
+Measured by the pilot on the phone with stereo on: sim 36 fps, mirror 18 fps. Two full frames per stereo frame is the cost; a half width eye needs the built and city pipelines to render into a viewport without resizing the renderer, which is the next step if wanted.
+
+Checks run on this tree: boot-check 10 of 10 clean, frame-check 34 passed, 0 failed. Neither exercises stereo.
