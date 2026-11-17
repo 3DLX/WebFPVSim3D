@@ -13,7 +13,7 @@
  *
  * HOW. Each eye is drawn by the map's own post pipeline, exactly as the sim
  * draws its mono frame, at the full canvas size, and the result is then
- * copied out and squeezed into that eye's half of the canvas:
+ * blitted, squeezed, into that eye's half of the canvas:
  *
  *   - nothing is resized. An earlier version resized the post chain to half
  *     the width, which is wrong for the built and city pipelines: their
@@ -30,7 +30,7 @@
  *     at `focus` without toeing in, which would tilt the horizon;
  *   - shadows are drawn for the first eye only and reused for the second.
  *
- * It costs two full frames and two framebuffer copies. A half width frame
+ * It costs two full frames and three framebuffer blits. A half width frame
  * per eye would be cheaper, but only with the pipelines' cooperation.
  *
  * The host does the lens correction and shows each half to its eye; the
@@ -67,10 +67,14 @@ if (typeof window !== 'undefined') {
 /* Reused, never allocated per frame (P8). */
 const size = new THREE.Vector2();
 const buf = new THREE.Vector2();
-const origin = new THREE.Vector2(0, 0);
 const savedPos = new THREE.Vector3();
 const baseProj = new THREE.Matrix4();
-let eyes = null;
+/* An RGBA8 renderbuffer the two eyes are blitted into side by side. Raw
+ * WebGL2, not a three.js texture copy: the sim's canvas is opaque (RGB), and
+ * copyTexSubImage2D refuses to copy an RGB framebuffer into an RGBA texture
+ * (that is what left the first version of this black), while
+ * blitFramebuffer converts between the two and scales on the way. */
+let sbs = null;
 
 /** The host's request, or null when stereo is off. */
 export function stereoRequest() {
@@ -86,59 +90,43 @@ export function stereoRequest() {
   };
 }
 
-function eyeTexture(w, h) {
-  const t = new THREE.FramebufferTexture(w, h);
-  t.minFilter = THREE.LinearFilter;
-  t.magFilter = THREE.LinearFilter;
-  return t;
-}
-
-/* The two eye copies and the quad that lays them side by side. The
- * material writes the copied pixels back unchanged: they are already the
- * pipeline's finished, display encoded output. */
-function eyesFor(w, h) {
-  if (eyes && eyes.w === w && eyes.h === h) {
-    return eyes;
+function sbsFor(gl, w, h) {
+  if (sbs && sbs.w === w && sbs.h === h) {
+    return sbs;
   }
-  if (eyes) {
-    eyes.left.dispose();
-    eyes.right.dispose();
+  if (sbs) {
+    gl.deleteFramebuffer(sbs.fb);
+    gl.deleteRenderbuffer(sbs.rb);
   }
-  const left = eyeTexture(w, h);
-  const right = eyeTexture(w, h);
-  if (!eyes) {
-    const material = new THREE.ShaderMaterial({
-      uniforms: { tLeft: { value: left }, tRight: { value: right } },
-      vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
-      fragmentShader: 'uniform sampler2D tLeft; uniform sampler2D tRight; varying vec2 vUv;'
-        + ' void main() { vec2 uv = vec2(fract(vUv.x * 2.0), vUv.y);'
-        + ' gl_FragColor = vUv.x < 0.5 ? texture2D(tLeft, uv) : texture2D(tRight, uv); }',
-      depthTest: false,
-      depthWrite: false,
-    });
-    const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material);
-    quad.frustumCulled = false;
-    const scene = new THREE.Scene();
-    scene.add(quad);
-    eyes = { material, scene, camera: new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1) };
-  }
-  eyes.material.uniforms.tLeft.value = left;
-  eyes.material.uniforms.tRight.value = right;
-  eyes.left = left;
-  eyes.right = right;
-  eyes.w = w;
-  eyes.h = h;
-  return eyes;
+  const rb = gl.createRenderbuffer();
+  gl.bindRenderbuffer(gl.RENDERBUFFER, rb);
+  gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA8, w, h);
+  gl.bindRenderbuffer(gl.RENDERBUFFER, null);
+  const fb = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, rb);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  sbs = { fb, rb, w, h };
+  return sbs;
 }
 
 /**
  * Draw one stereo frame through `post` (the map's pipeline, anything with a
- * render() that ends on the screen).
+ * render() that ends on the screen). Without WebGL2 it draws the mono frame.
  */
 export function renderStereo(post, camera, renderer, req) {
+  if (!renderer.capabilities.isWebGL2) {
+    post.render();
+    return;
+  }
+  const gl = renderer.getContext();
   renderer.getSize(size);
   renderer.getDrawingBufferSize(buf);
-  const e = eyesFor(Math.max(1, buf.x), Math.max(1, buf.y));
+  const w = Math.max(1, Math.floor(buf.x));
+  const h = Math.max(1, Math.floor(buf.y));
+  const half = Math.floor(w / 2);
+  renderer.setRenderTarget(null);
+  const target = sbsFor(gl, w, h);
 
   const aspect = camera.aspect;
   savedPos.copy(camera.position);
@@ -147,27 +135,41 @@ export function renderStereo(post, camera, renderer, req) {
   baseProj.copy(camera.projectionMatrix);
 
   const shadowAuto = renderer.shadowMap.autoUpdate;
-  const half = req.eyeSep / 2;
+  const sep = req.eyeSep / 2;
   try {
     for (let eye = 0; eye < 2; eye += 1) {
       const side = eye === 0 ? -1 : 1;
       camera.position.copy(savedPos);
-      camera.translateX(side * half);
+      camera.translateX(side * sep);
       camera.updateMatrixWorld(true);
       /* Off-axis frustum: shift the projection toward the middle so the two
        * frusta cross at `focus`. Column major, elements[8] is m[0][2]. */
       camera.projectionMatrix.copy(baseProj);
-      camera.projectionMatrix.elements[8] += -side * half * baseProj.elements[0] / req.focus;
+      camera.projectionMatrix.elements[8] += -side * sep * baseProj.elements[0] / req.focus;
       camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
       if (eye === 1) {
         renderer.shadowMap.autoUpdate = false;
         renderer.shadowMap.needsUpdate = false;
       }
       post.render();
+      /* The eye's full frame, squeezed into its half of the side by side
+       * buffer. Blits ignore the viewport but not the scissor test. */
       renderer.setRenderTarget(null);
-      renderer.copyFramebufferToTexture(origin, eye === 0 ? e.left : e.right);
+      renderer.setScissorTest(false);
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, target.fb);
+      gl.blitFramebuffer(0, 0, w, h, eye * half, 0, eye === 0 ? half : w, h,
+        gl.COLOR_BUFFER_BIT, gl.LINEAR);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     }
+    /* Both eyes back onto the screen. */
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, target.fb);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+    gl.blitFramebuffer(0, 0, w, h, 0, 0, w, h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
   } finally {
+    /* Three.js caches the bound framebuffer; leave it on the screen, which
+     * is what setRenderTarget(null) above told it. */
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     renderer.shadowMap.autoUpdate = shadowAuto;
     renderer.shadowMap.needsUpdate = false;
     camera.position.copy(savedPos);
@@ -175,14 +177,6 @@ export function renderStereo(post, camera, renderer, req) {
     camera.updateProjectionMatrix();
     camera.updateMatrixWorld(true);
   }
-
-  const autoClear = renderer.autoClear;
-  renderer.autoClear = false;
-  renderer.setRenderTarget(null);
-  renderer.setViewport(0, 0, size.x, size.y);
-  renderer.setScissorTest(false);
-  renderer.render(e.scene, e.camera);
-  renderer.autoClear = autoClear;
 
   if (typeof window !== 'undefined') {
     window.__fpvrStereoLast = performance.now();
