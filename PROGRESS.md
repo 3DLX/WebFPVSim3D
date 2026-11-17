@@ -76413,3 +76413,11 @@ What went wrong: the branch was first built on an older main and was rebased ont
 ## 2026-11-17: fpvr-stereo hosted for FPVR on a Render static site
 
 The fork branch is deployed as its own Render static site (no build command, publish directory `.`), so FPVR can load it at a root path. GitHub Pages under a project subpath was ruled out because of the absolute `/src/maps/` paths. What went wrong: the first load hit the site while the first deploy was still going out, 28 module URLs came back 404 and the CDN kept serving those 404s for the `?d=` stamped URLs after the files were live (a plain fetch of the same file returned 200). This commit exists to trigger a fresh deploy and with it a fresh cache. No code changed.
+
+## 2026-11-17: fpvr-stereo: stop resizing the map's pipeline, copy each eye instead
+
+The pilot flew the first version in FPVR and reported broken frames: walls missing, objects drawn over each other in the wrong order. Reproduced in a desktop browser on Thomas More's Shop at Low: the renderer had shrunk to 256 by 768 on a 1024 by 768 page. Root cause: renderStereo called `post.setSize(halfW, h)` every frame, and the built and city pipelines' setSize also call `renderer.setSize`, so the canvas halved again on each frame until it hit a floor. The field's composer (post.js) does not touch the renderer, which is why the open field looked right.
+
+Fix: nothing is resized any more. Each eye is drawn by the map's own pipeline at full canvas size with the camera's aspect set to half the screen's, copied out with `copyFramebufferToTexture`, and a final quad lays the two copies side by side. The pipelines are black boxes that end on the screen, which all of them already do. Cost: two full frames and two copies per stereo frame. `endStereo` is now a no-op, kept so main.js does not change.
+
+Checks run on this tree: gen-preload up to date, boot-check 10 of 10 clean, frame-check 34 passed, 0 failed. Neither can see this bug: it needs a built pipeline map with stereo on, which is checked by loading the deployed branch in a browser after the push.

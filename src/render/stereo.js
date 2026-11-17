@@ -11,20 +11,27 @@
  * parallax): nearer things stand out of the screen, farther things sit
  * behind it.
  *
- * HOW. The whole post chain (normals and depth prepass, colour, ink
- * outlines, grade) is rendered once per eye, so each eye gets exactly the
- * picture the sim draws in mono, just from its own position and into its own
- * half of the canvas:
+ * HOW. Each eye is drawn by the map's own post pipeline, exactly as the sim
+ * draws its mono frame, at the full canvas size, and the result is then
+ * copied out and squeezed into that eye's half of the canvas:
  *
- *   - the composer is resized to half the width while stereo is on, so the
- *     ink outline keeps its pixel width and no pass reads a stretched buffer;
+ *   - nothing is resized. An earlier version resized the post chain to half
+ *     the width, which is wrong for the built and city pipelines: their
+ *     setSize also sizes the renderer, so the canvas halved again on every
+ *     frame and the picture fell apart (walls missing, wrong overlap) on
+ *     the indoor maps. The pipelines are treated as black boxes that draw a
+ *     full frame to the screen, which every one of them already does;
+ *   - the camera's aspect is set to half the screen's for the eye, so the
+ *     full size frame holds a picture stretched by two across, and the
+ *     squeeze back into half the width puts the proportions right;
  *   - the camera is moved half the eye separation along its own x axis and
  *     its frustum is shifted toward the middle (an off-axis, converging
  *     projection, the same maths as three.js StereoCamera) so the eyes meet
  *     at `focus` without toeing in, which would tilt the horizon;
- *   - the vertical field of view is the pilot's own, the horizontal one per
- *     eye is half the screen's, which is what a viewer's lens expects;
  *   - shadows are drawn for the first eye only and reused for the second.
+ *
+ * It costs two full frames and two framebuffer copies. A half width frame
+ * per eye would be cheaper, but only with the pipelines' cooperation.
  *
  * The host does the lens correction and shows each half to its eye; the
  * sim's own fisheye is left off while stereo is on (main.js), because a
@@ -59,9 +66,11 @@ if (typeof window !== 'undefined') {
 
 /* Reused, never allocated per frame (P8). */
 const size = new THREE.Vector2();
+const buf = new THREE.Vector2();
+const origin = new THREE.Vector2(0, 0);
 const savedPos = new THREE.Vector3();
 const baseProj = new THREE.Matrix4();
-let halfSized = false;
+let eyes = null;
 
 /** The host's request, or null when stereo is off. */
 export function stereoRequest() {
@@ -77,75 +86,109 @@ export function stereoRequest() {
   };
 }
 
+function eyeTexture(w, h) {
+  const t = new THREE.FramebufferTexture(w, h);
+  t.minFilter = THREE.LinearFilter;
+  t.magFilter = THREE.LinearFilter;
+  return t;
+}
+
+/* The two eye copies and the quad that lays them side by side. The
+ * material writes the copied pixels back unchanged: they are already the
+ * pipeline's finished, display encoded output. */
+function eyesFor(w, h) {
+  if (eyes && eyes.w === w && eyes.h === h) {
+    return eyes;
+  }
+  if (eyes) {
+    eyes.left.dispose();
+    eyes.right.dispose();
+  }
+  const left = eyeTexture(w, h);
+  const right = eyeTexture(w, h);
+  if (!eyes) {
+    const material = new THREE.ShaderMaterial({
+      uniforms: { tLeft: { value: left }, tRight: { value: right } },
+      vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
+      fragmentShader: 'uniform sampler2D tLeft; uniform sampler2D tRight; varying vec2 vUv;'
+        + ' void main() { vec2 uv = vec2(fract(vUv.x * 2.0), vUv.y);'
+        + ' gl_FragColor = vUv.x < 0.5 ? texture2D(tLeft, uv) : texture2D(tRight, uv); }',
+      depthTest: false,
+      depthWrite: false,
+    });
+    const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material);
+    quad.frustumCulled = false;
+    const scene = new THREE.Scene();
+    scene.add(quad);
+    eyes = { material, scene, camera: new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1) };
+  }
+  eyes.material.uniforms.tLeft.value = left;
+  eyes.material.uniforms.tRight.value = right;
+  eyes.left = left;
+  eyes.right = right;
+  eyes.w = w;
+  eyes.h = h;
+  return eyes;
+}
+
 /**
- * Draws one frame as two eyes side by side. post is the view's composer
- * wrapper from src/render/post.js (render, setSize, composer).
+ * Draw one stereo frame through `post` (the map's pipeline, anything with a
+ * render() that ends on the screen).
  */
 export function renderStereo(post, camera, renderer, req) {
   renderer.getSize(size);
-  const fullW = size.x;
-  const h = size.y;
-  const halfW = Math.max(1, Math.floor(fullW / 2));
-  /* Half width composer. Checked every frame against what the composer
-   * holds, so a resize or a render scale change made while stereo is on is
-   * picked up on the next frame. */
-  if (!halfSized || (post.composer && post.composer._width !== halfW) || (post.composer && post.composer._height !== h)) {
-    post.setSize(halfW, h);
-    halfSized = true;
-  }
+  renderer.getDrawingBufferSize(buf);
+  const e = eyesFor(Math.max(1, buf.x), Math.max(1, buf.y));
 
   const aspect = camera.aspect;
   savedPos.copy(camera.position);
-  camera.aspect = halfW / h;
+  camera.aspect = (size.x / 2) / size.y;
   camera.updateProjectionMatrix();
   baseProj.copy(camera.projectionMatrix);
 
   const shadowAuto = renderer.shadowMap.autoUpdate;
   const half = req.eyeSep / 2;
   try {
-    renderer.setScissorTest(true);
     for (let eye = 0; eye < 2; eye += 1) {
       const side = eye === 0 ? -1 : 1;
       camera.position.copy(savedPos);
       camera.translateX(side * half);
       camera.updateMatrixWorld(true);
-      /* Off-axis frustum: shift the window toward the middle so both
-       * frusta meet at req.focus. elements[8] is (r + l) / (r - l). */
+      /* Off-axis frustum: shift the projection toward the middle so the two
+       * frusta cross at `focus`. Column major, elements[8] is m[0][2]. */
       camera.projectionMatrix.copy(baseProj);
       camera.projectionMatrix.elements[8] += -side * half * baseProj.elements[0] / req.focus;
       camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
-
-      renderer.setViewport(eye * halfW, 0, halfW, h);
-      renderer.setScissor(eye * halfW, 0, halfW, h);
       if (eye === 1) {
         renderer.shadowMap.autoUpdate = false;
         renderer.shadowMap.needsUpdate = false;
       }
       post.render();
+      renderer.setRenderTarget(null);
+      renderer.copyFramebufferToTexture(origin, eye === 0 ? e.left : e.right);
     }
   } finally {
     renderer.shadowMap.autoUpdate = shadowAuto;
-    /* The first eye's render consumed any pending shadow update. */
     renderer.shadowMap.needsUpdate = false;
-    renderer.setScissorTest(false);
-    renderer.setViewport(0, 0, fullW, h);
-    renderer.setScissor(0, 0, fullW, h);
     camera.position.copy(savedPos);
     camera.aspect = aspect;
     camera.updateProjectionMatrix();
     camera.updateMatrixWorld(true);
   }
+
+  const autoClear = renderer.autoClear;
+  renderer.autoClear = false;
+  renderer.setRenderTarget(null);
+  renderer.setViewport(0, 0, size.x, size.y);
+  renderer.setScissorTest(false);
+  renderer.render(e.scene, e.camera);
+  renderer.autoClear = autoClear;
+
   if (typeof window !== 'undefined') {
     window.__fpvrStereoLast = performance.now();
   }
 }
 
-/** Back to a full width composer after stereo, once. */
-export function endStereo(post, renderer) {
-  if (!halfSized) {
-    return;
-  }
-  halfSized = false;
-  renderer.getSize(size);
-  post.setSize(size.x, size.y);
-}
+/* Kept for the draw site in main.js: nothing is resized any more, so there
+ * is nothing to put back when stereo goes off. */
+export function endStereo() {}
