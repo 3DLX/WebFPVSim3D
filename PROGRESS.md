@@ -76409,3 +76409,7 @@ Physics, the plant, the module ABI and the build are untouched. Render only, and
 Checks run on this exact tree: `node scripts/gen-preload.js` (fresh.js regenerated, up to date), `node scripts/boot-check.js` 10 of 10 clean, `node scripts/frame-check.js` 34 passed, 0 failed. A headless Chromium run on SwiftShader with the flag set showed a side-by-side frame with effects and a level horizon in both eyes. `npm run verify` and `node scripts/shots.js` were not run: the change is render only and opt in. Not flown yet; the pilot flies it in FPVR next.
 
 What went wrong: the branch was first built on an older main and was rebased onto d2a28553 before the push; the main.js hunk applied clean and fresh.js was regenerated rather than merged.
+
+## 2026-11-17: fpvr-stereo hosted for FPVR on a Render static site
+
+The fork branch is deployed as its own Render static site (no build command, publish directory `.`), so FPVR can load it at a root path. GitHub Pages under a project subpath was ruled out because of the absolute `/src/maps/` paths. What went wrong: the first load hit the site while the first deploy was still going out, 28 module URLs came back 404 and the CDN kept serving those 404s for the `?d=` stamped URLs after the files were live (a plain fetch of the same file returned 200). This commit exists to trigger a fresh deploy and with it a fresh cache. No code changed.
