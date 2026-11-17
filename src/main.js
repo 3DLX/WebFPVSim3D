@@ -135,6 +135,7 @@ import {
 } from './share/session.js';
 import { showSupportPrompt } from './share/supportprompt.js';
 import { createShowcase } from './render/showcase.js';
+import { stereoRequest, renderStereo, endStereo } from './render/stereo.js';
 import { celTimeCount } from './render/celmat.js';
 import { MAPS, mapById } from './maps/registry.js';
 import { MAP_PRELOAD } from './maps/preload.js';
@@ -14127,9 +14128,18 @@ export async function boot({ loading, bootStart, mapId }) {
        * impact frame, or a replay seen through it), never the intro, the
        * finish camera or a chase camera. A uniform, set only when one of
        * its inputs moved: see src/render/fisheye.js. */
-      setFisheye(view.post, fpvLens || (replayMode && replayCamera === 'fpv') ? ui.settings.fisheye : 0,
+      /* Side-by-side stereo for a phone VR viewer, only when a host page
+       * asks and only through the pilot's own lens: see src/render/stereo.js.
+       * The sim's fisheye stays off then, the viewer corrects its own lens. */
+      const stereo = fpvLens && !replayMode ? stereoRequest() : null;
+      setFisheye(view.post, !stereo && (fpvLens || (replayMode && replayCamera === 'fpv')) ? ui.settings.fisheye : 0,
         shell.camera.fov, shell.camera.aspect);
-      view.post.render();
+      if (stereo) {
+        renderStereo(view.post, shell.camera, shell.renderer, stereo);
+      } else {
+        endStereo(view.post, shell.renderer);
+        view.post.render();
+      }
       gpuGate.submitted(performance.now());
       timerDraws += 1;
       if (timerJudging) {
