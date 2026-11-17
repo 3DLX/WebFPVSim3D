@@ -76397,3 +76397,15 @@ Calls / triangles. He stands at the bench in the first two views and is out of t
 - The first walking pictures never caught him walking: the headless High renderer runs the title clock about ten times slower than the wall, so the wait ran out first. Taken on Low.
 
 The owner, 16 November 2026 23:31Z (17 November, 7:31 AM Perth), on draft PR 278 after its latency rise was stated: "Push to main". Fast forwarded onto main a04f83c; his word accepts the rise.
+
+## 2026-11-17: Opt-in side-by-side stereo for phone VR viewers (fork branch fpvr-stereo, FPVR)
+
+What: a new `src/render/stereo.js` and a three line hook at the flight draw site in `src/main.js`. When the host page sets `window.__fpvrStereo = { on: true, eyeSep, focus }` (FPVR, the Android Cardboard app, does this from its debug menu), the FPV view renders twice into the left and right halves of the canvas: the camera is offset by half the eye separation per eye, the projection gets an off-axis shift so both eyes converge at `focus` metres, and the full post chain (`view.post.render()`, outline and grade included) runs per eye at half width. Fisheye is skipped while stereo is on, because the viewer's own lens correction runs in FPVR. The shadow map renders once per frame (second eye reuses it). With the flag absent nothing changes: `stereoRequest()` returns null and the old path runs, `endStereo` restores the composer size once.
+
+Why: an earlier hack that hooked three.js from outside the page drew faces from one eye only and jumped the horizon, because the map's own mono passes and the EffectComposer were not eye aware. Doing it at the draw site is the only place both are under control.
+
+Physics, the plant, the module ABI and the build are untouched. Render only, and only when a host opts in.
+
+Checks run on this exact tree: `node scripts/gen-preload.js` (fresh.js regenerated, up to date), `node scripts/boot-check.js` 10 of 10 clean, `node scripts/frame-check.js` 34 passed, 0 failed. A headless Chromium run on SwiftShader with the flag set showed a side-by-side frame with effects and a level horizon in both eyes. `npm run verify` and `node scripts/shots.js` were not run: the change is render only and opt in. Not flown yet; the pilot flies it in FPVR next.
+
+What went wrong: the branch was first built on an older main and was rebased onto d2a28553 before the push; the main.js hunk applied clean and fresh.js was regenerated rather than merged.
